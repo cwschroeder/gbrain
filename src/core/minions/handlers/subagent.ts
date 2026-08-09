@@ -592,7 +592,14 @@ export function makeSubagentHandler(deps: SubagentDeps) {
             : {}),
         };
 
-        const combinedSignal = mergeSignals(ctx.signal, ctx.shutdownSignal);
+        // Hard per-call timeout. Without this, a provider that accepts the
+        // connection but never responds (observed on openrouter-compatible
+        // backends for complex synthesize/extract calls) hangs the turn
+        // indefinitely — ctx.signal only fires on job cancel/shutdown.
+        // Mirrors EXTRACTOR_CALL_TIMEOUT_MS in propose-takes.ts.
+        const SUBAGENT_CALL_TIMEOUT_MS = 120_000;
+        const timeoutSignal = AbortSignal.timeout(SUBAGENT_CALL_TIMEOUT_MS);
+        const combinedSignal = mergeSignals(ctx.signal, ctx.shutdownSignal, timeoutSignal);
         assistantMsg = await client.create(params, { signal: combinedSignal });
       } catch (err) {
         // Release lease eagerly on error so we don't starve capacity.
@@ -1512,16 +1519,17 @@ function asStringIfNotObject(value: unknown): string {
  * Merge two AbortSignals into one. Fires when either source aborts. No-op
  * polyfill when AbortSignal.any isn't available yet (Node ≥ 20 has it).
  */
-function mergeSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
+function mergeSignals(...signals: AbortSignal[]): AbortSignal {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyFn = (AbortSignal as any).any;
-  if (typeof anyFn === 'function') return anyFn([a, b]) as AbortSignal;
+  if (typeof anyFn === 'function') return anyFn(signals) as AbortSignal;
   // Manual merge.
   const ac = new AbortController();
-  if (a.aborted || b.aborted) ac.abort();
+  if (signals.some((s) => s.aborted)) ac.abort();
   else {
-    a.addEventListener('abort', () => ac.abort(), { once: true });
-    b.addEventListener('abort', () => ac.abort(), { once: true });
+    for (const s of signals) {
+      s.addEventListener('abort', () => ac.abort(), { once: true });
+    }
   }
   return ac.signal;
 }
