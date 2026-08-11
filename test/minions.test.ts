@@ -2084,6 +2084,16 @@ describe('MinionQueue: v0.19.1 maxWaiting — cap correctness + race (D2/H2)', (
     expect(b2.id).toBe(b.id); // and its own cap
   });
 
+  test('cross-source isolation accepts source_id used by autopilot-cycle jobs', async () => {
+    const a = await queue.add('cycle', { source_id: 'default' }, { maxWaiting: 1 });
+    const a2 = await queue.add('cycle', { source_id: 'default' }, { maxWaiting: 1 });
+    expect(a2.id).toBe(a.id);
+    const b = await queue.add('cycle', { source_id: 'projects' }, { maxWaiting: 1 });
+    expect(b.id).not.toBe(a.id);
+    const b2 = await queue.add('cycle', { source_id: 'projects' }, { maxWaiting: 1 });
+    expect(b2.id).toBe(b.id);
+  });
+
   test('unset maxWaiting — normal submit path, no coalesce, no cap', async () => {
     const a = await queue.add('uncapped', {});
     const b = await queue.add('uncapped', {});

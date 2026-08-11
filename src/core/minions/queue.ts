@@ -185,9 +185,10 @@ export class MinionQueue {
         // while dispatch logs showed its syncs "dispatched" (coalesced into
         // the default row). Key the lock and the count on sourceId when the
         // submission carries one; NULL keeps legacy single-scope behavior.
-        const bpSourceId = typeof (data as Record<string, unknown> | undefined)?.sourceId === 'string'
-          ? (data as Record<string, unknown>).sourceId as string
-          : null;
+        const sourceData = data as Record<string, unknown> | undefined;
+        const bpSourceId = typeof sourceData?.sourceId === 'string'
+          ? sourceData.sourceId
+          : (typeof sourceData?.source_id === 'string' ? sourceData.source_id : null);
         await tx.executeRaw(
           `SELECT pg_advisory_xact_lock(hashtext('minion_maxwaiting:' || $1 || ':' || $2 || ':' || coalesce($3, '')))`,
           [jobName, backpressureQueue, bpSourceId]
@@ -196,7 +197,7 @@ export class MinionQueue {
           `SELECT count(*)::text AS count
            FROM minion_jobs
            WHERE name = $1 AND queue = $2 AND status = 'waiting'
-             AND ($3::text IS NULL OR data->>'sourceId' IS NOT DISTINCT FROM $3)`,
+             AND ($3::text IS NULL OR coalesce(data->>'sourceId', data->>'source_id') IS NOT DISTINCT FROM $3)`,
           [jobName, backpressureQueue, bpSourceId]
         );
         const waitingCount = parseInt(waitingCountRows[0]?.count ?? '0', 10);
@@ -204,7 +205,7 @@ export class MinionQueue {
           const existingWaiting = await tx.executeRaw<Record<string, unknown>>(
             `SELECT * FROM minion_jobs
              WHERE name = $1 AND queue = $2 AND status = 'waiting'
-               AND ($3::text IS NULL OR data->>'sourceId' IS NOT DISTINCT FROM $3)
+               AND ($3::text IS NULL OR coalesce(data->>'sourceId', data->>'source_id') IS NOT DISTINCT FROM $3)
              ORDER BY created_at DESC, id DESC
              LIMIT 1`,
             [jobName, backpressureQueue, bpSourceId]

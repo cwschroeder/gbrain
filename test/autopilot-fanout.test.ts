@@ -289,19 +289,14 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(parsed.pending.length).toBe(2);
   });
 
-  test('per-source submit MUST NOT pass maxWaiting (regression — coalesces all sources to one job)', async () => {
-    // Direct unit-stub queues can't enforce maxWaiting semantics (the
-    // production MinionQueue implementation does), so this catches the
-    // regression by inspecting the submit opts at the dispatch boundary.
-    // If a future refactor re-adds maxWaiting:1 to the per-source path,
-    // the production fan-out would silently coalesce N sources to ONE
-    // waiting job per tick — killing the entire feature. The e2e test
-    // also catches this against a real queue, but this guard fires in
-    // unit tests too so the bug surfaces 100x faster.
+  test('per-source submit caps one waiting cycle per source', async () => {
+    // MinionQueue scopes maxWaiting by data.source_id/data.sourceId. The cap
+    // therefore prevents five-minute slot keys from piling up while preserving
+    // one independent waiting cycle for every source.
     const { engine, queue, added, fanoutOpts } = makeStubs([src('a'), src('b'), src('c')]);
     await dispatchPerSource(engine, queue, fanoutOpts);
     for (const job of added) {
-      expect(job.opts.maxWaiting).toBeUndefined();
+      expect(job.opts.maxWaiting).toBe(1);
     }
   });
 
