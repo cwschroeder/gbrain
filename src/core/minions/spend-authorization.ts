@@ -23,6 +23,7 @@ import { opError } from '../ops/contract.ts';
 import { withAIInvocationGuard } from '../ai/invocation-guard.ts';
 import { GroupBudgetRefusal, RESERVATION_TTL_MS, readGroupSpend, reserveGroup, settle, type GroupSpend } from './budget-meter.ts';
 import { actualCents, maximumInvocationCents } from './delegated-spend.ts';
+import { loadPricingOverrides } from '../budget/budget-tracker.ts';
 import { UnrecoverableError } from './errors.ts';
 import { RateLeaseUnavailableError } from './rate-leases.ts';
 import type { MinionJob, MinionJobContext } from './types.ts';
@@ -288,10 +289,11 @@ export async function runWithJobSpend<T>(
   const spendCtx: MinionJobContext = { ...ctx, spend: { record, budget_key: budgetKey } };
   if (record.uncapped) return handler(spendCtx);
   const capCents = cents(record.cap_usd!);
+  const pricingOverrides = await loadPricingOverrides(engine);
   const seen: { refusal: SpendGroupRefusedError | SpendGroupPressureError | null } = { refusal: null };
   let warned = false;
   const guard = async (call: Parameters<Parameters<typeof withAIInvocationGuard>[0]>[0]) => {
-    const max = maximumInvocationCents(call);
+    const max = maximumInvocationCents(call, pricingOverrides);
     if (max === null) {
       if (record.cap_source === 'user') throw (seen.refusal = await spendRefusal(engine, job, record, { kind: 'no_pricing', model: call.model }));
       if (!warned) {
@@ -311,7 +313,7 @@ export async function runWithJobSpend<T>(
       throw (seen.refusal = await spendRefusal(engine, job, record, { kind: 'cost', overdueHolds: true }));
     }
     return { async settle(usage: Parameters<typeof actualCents>[1]) {
-      const c = actualCents(call, usage);
+      const c = actualCents(call, usage, pricingOverrides);
       if (c !== null) await settle(engine, hold.reservationId, c, call.operation);
       else await engine.executeRaw(
         `UPDATE mcp_spend_reservations SET usage_unknown_reason = $2 WHERE reservation_id = $1 AND status IN ('pending','expired')`,

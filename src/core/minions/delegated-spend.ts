@@ -1,6 +1,8 @@
 import type { BrainEngine } from '../engine.ts';
+import { loadPricingOverrides } from '../budget/budget-tracker.ts';
 import { canonicalLookup } from '../model-pricing.ts';
 import { lookupEmbeddingPrice } from '../embedding-pricing.ts';
+import { overrideFor, type PricingOverrides } from '../budget/reservation-cost.ts';
 import { withAIInvocationGuard, type AIInvocation, type AIInvocationUsage } from '../ai/invocation-guard.ts';
 import { reserve, settle } from './budget-meter.ts';
 import { effectiveDelegation, type DelegationSnapshot } from './delegated-policy.ts';
@@ -10,7 +12,11 @@ export class DelegationPricingError extends UnrecoverableError {
   constructor(reason: string) { super(`agent_spend_unbounded: ${reason}`); this.name = 'DelegationPricingError'; }
 }
 
-function prices(call: AIInvocation): { input: number; output: number; read: number; write: number } | null {
+function prices(call: AIInvocation, overrides?: PricingOverrides): { input: number; output: number; read: number; write: number } | null {
+  const override = overrideFor(call.model, overrides);
+  if (override) return { input: override.input, output: override.output,
+    read: override.cache_read ?? override.input,
+    write: call.cacheWriteTtl === '1h' ? override.input * 2 : override.cache_write ?? override.input };
   if (call.kind === 'chat') {
     const p = canonicalLookup(call.model);
     if (!p) return null;
@@ -22,17 +28,18 @@ function prices(call: AIInvocation): { input: number; output: number; read: numb
   return p.kind === 'known' ? { input: p.pricePerMTok, output: 0, read: 0, write: 0 } : null;
 }
 
-export function maximumInvocationCents(call: AIInvocation): number | null {
-  const p = prices(call);
+export function maximumInvocationCents(call: AIInvocation, overrides?: PricingOverrides): number | null {
+  const p = prices(call, overrides);
+  const maxOutputTokens = call.maxOutputTokens ?? (call.kind === 'embedding' || call.kind === 'rerank' ? 0 : undefined);
   if (!p || !Number.isSafeInteger(call.maxInputTokens) || call.maxInputTokens! < 0
-    || !Number.isSafeInteger(call.maxOutputTokens) || call.maxOutputTokens! < 0) return null;
+    || !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens! < 0) return null;
   // Full declared input ceiling covers cache, tools and provider framing.
   // 1h cache writes can cost 2x base input; reserve that worst case.
-  return Math.ceil((call.maxInputTokens! * Math.max(p.input * 2, p.read, p.write) + call.maxOutputTokens! * p.output) / 100) / 100;
+  return Math.ceil((call.maxInputTokens! * Math.max(p.input * 2, p.read, p.write) + maxOutputTokens! * p.output) / 100) / 100;
 }
 
-export function actualCents(call: AIInvocation, usage: AIInvocationUsage | null): number | null {
-  const p = prices(call);
+export function actualCents(call: AIInvocation, usage: AIInvocationUsage | null, overrides?: PricingOverrides): number | null {
+  const p = prices(call, overrides);
   if (!p || !usage) return null;
   const values = [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens ?? 0, usage.cacheWriteTokens ?? 0];
   if (values.some(v => !Number.isFinite(v) || v < 0)) return null;
@@ -44,14 +51,15 @@ export function withDelegatedSpend<T>(engine: BrainEngine, snapshot: DelegationS
   return withAIInvocationGuard(async call => {
     const effective = await effectiveDelegation(engine, snapshot, jobId);
     const cap = effective.budgetUsdPerDay === null ? null : Math.round(Number(effective.budgetUsdPerDay) * 100);
-    const max = maximumInvocationCents(call);
+    const overrides = await loadPricingOverrides(engine);
+    const max = maximumInvocationCents(call, overrides);
     if (cap !== null && max === null) throw new DelegationPricingError(`${call.operation} has no known price and enforced maximum for ${call.model}; no provider call was made`);
     const hold = await reserve(engine, { clientId: snapshot.clientId, capCents: cap,
       estimatedCents: max ?? 0, estimateKnown: max !== null, model: call.model,
       provider: call.model.split(':')[0] || 'unknown', jobId,
       validateAdmission: async tx => { await effectiveDelegation(tx, snapshot, jobId); } });
     return { async settle(usage) {
-      const cents = actualCents(call, usage);
+      const cents = actualCents(call, usage, overrides);
       if (cents !== null) await settle(engine, hold.reservationId, cents, call.operation);
       else await engine.executeRaw(
         `UPDATE mcp_spend_reservations SET usage_unknown_reason = $2 WHERE reservation_id = $1 AND status IN ('pending','expired')`,
