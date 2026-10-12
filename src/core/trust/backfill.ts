@@ -11,8 +11,8 @@
  * - pages.source_kind: webhook / file-watcher / inbox-folder / cron-scheduler
  *   (ingestion captures) external_untrusted; mcp:* / put_page / capture-cli
  *   agent_written;
- * - frontmatter transcript_import, provenance: auto-extracted, dream_generated:
- *   agent_written (model- or session-derived);
+ * - frontmatter transcript_import, provenance: auto-extracted, extracted_by
+ *   (extract_atoms), dream_generated: agent_written (model- or session-derived);
  * - facts.source lane tags (the facts backstop, conversation-facts and
  *   extract_facts lanes) and takes.source take_proposals#: agent_written;
  * - post-v193 rows through write_request_id -> persistence_requests (CEO-17):
@@ -163,6 +163,7 @@ function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilin
     if (cols.has('pages', 'frontmatter')) {
       signals.add('frontmatter_provenance');
       terms.push(`CASE WHEN ${p}.frontmatter ? 'transcript_import' OR ${p}.frontmatter->>'provenance' = 'auto-extracted'
+        OR NULLIF(btrim(CASE WHEN jsonb_typeof(${p}.frontmatter->'extracted_by') = 'string' THEN ${p}.frontmatter->>'extracted_by' END, E' \\t\\n\\r'), '') IS NOT NULL
         OR ${p}.frontmatter->>'dream_generated' = 'true' THEN ${rank('agent_written')} END`);
     }
     if (cols.has('pages', 'revision_write_request_id')) { const q = request(r); if (q) terms.push(q); }
